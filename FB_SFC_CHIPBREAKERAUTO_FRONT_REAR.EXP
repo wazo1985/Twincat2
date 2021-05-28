@@ -1,0 +1,474 @@
+
+(* @NESTEDCOMMENTS := 'Yes' *)
+(* @PATH := '\/10_LIST_OF_OPERATIONS\/OpModes\/Chip Breaker' *)
+(* @OBJECTFLAGS := '0, 8' *)
+(* @SYMFILEFLAGS := '2048' *)
+FUNCTION_BLOCK FB_SFC_CHIPBREAKERAUTO_Front_Rear
+VAR_INPUT
+				(*Manual Touch*)
+				YDistanceToTouchPos					:	LREAL;
+				ManPosActive							:	BOOL;
+				XMoveManual							:	BOOL;
+				DoubleTouch								:	BOOL;
+				SimpleTouch								:	BOOL;
+				CbaPneumatic							:	 BOOL;
+				Stepper									:	 BOOL;
+				Reset									:	BOOL;
+				ActualSawBlade							:	ST_SawBlade;
+				ActualGrindingWheel						:	ST_GrindingWheel;
+				ActualJob								:	ST_Job;
+				PauseSwitchActive						:	BOOL;
+				AutomaticMode							:	 BOOL;
+				Start										:	 BOOL;
+				MachineStateSafetyStateActive				:	 BOOL;
+				MachineStateSharpenerDoorIsClosed		:        	BOOL;
+				GrindingDirCw							:	 BOOL;
+				AFrontPos								:	 LREAL;
+				TeethNumber								:	 INT;
+				ARearPos								:	 LREAL;
+				SawBladeDiameter						:	 LREAL;
+				CbaMotionType							:	 E_MotionType;
+END_VAR
+VAR_OUTPUT
+				ActualStep								:	INT;
+				ErrorOut									:	BOOL;
+				ErrorID									:	DINT;
+				Paused									:	BOOL;
+				PauseAvailable							:	BOOL;
+				PauseRequest							:	BOOL;
+				CammingActive							:	BOOL;
+				ActualRevolutions							:	 UINT;
+				ActualInfeed								:	LREAL;							(* actual infeed *)
+				PartialInfeed								:	LREAL;
+				ZaxisCbaLimit							:	BOOL;
+				CBAutoNotPossibleWithTooLargeSbDiameter	:	BOOL;
+				WarningAaxisIsSlow						:	BOOL;
+				CbaSpindleLowSpeedOutput				:	BOOL;
+				SubFunctionStep							:	INT;
+END_VAR
+
+VAR_IN_OUT
+				TouchPositionXAxis						:	 LREAL;
+				TouchPositionZAxis						:	 LREAL;
+				Done									:	 BOOL;
+END_VAR
+
+VAR
+				SfcChipBreakerAuto						:	 FB_SUBFUNC_SEQ_CONTROL;	(* FB sfc *)
+
+				Chip_Breaker_Servo						:	 FB_SFC_CHIPBREAKER_AUTO;
+				Chip_Breaker_Cylinder						:	 FB_SFC_CHIPBREAKER_AUTO;
+				StepNew									:	 INT;
+				StepAction								:	 BOOL;
+				StepActionImPulse						:	 BOOL;
+				AxisState								:	 E_StateMachineAxis;
+				PauseStep								:	 INT;
+				WorkingStepNo							:	 INT;
+				NumberTouch							:	 INT;
+				Delta									:	 INT;
+				SBCircumference							:	 LREAL;
+				ChipBreakerAutoXAxisMaxVelo				:	 LREAL;
+				ChipBreakerXAxisVelo						:	 LREAL;
+				TouchPositionXAxisFront					:	 LREAL;
+				TouchPositionZAxisFront					:	 LREAL;
+				TouchPositionXAxisRear					:	 LREAL;
+				ChipBreakerAutoVeloTemp					:	 LREAL;
+				ChipBreakerManVeloOverrideFactor			:	 LREAL;
+				ZAxisStartPosition							:	 LREAL;
+				XaxisEndPOs								:	 LREAL;
+				XAxisStartPosition							:	 LREAL;
+				XaxisEndPOsFront						:	 LREAL;
+				ChipBreakerAutoServoDone				:	 BOOL;
+				ChipBreakerAutoSpindleDone				:	 BOOL;
+				ActualTeeth								:	 INT;
+				StopChipBreaker							:	 BOOL;
+				TONWaitSafetyStatePause					:	 TON;
+END_VAR
+
+(* @END_DECLARATION := '0' *)
+
+(* ---------------------------------------------------- SFC CHIPBREAKER AUTO ------------------------------------------------------ *)
+
+		(*------------- call sfc functionblock--------------- *)
+	SfcChipBreakerAuto(
+						StepNew			:=	StepNew ,
+						Reset			:=	Reset ,
+						Step			=>	ActualStep ,
+						StepAction		=>	StepAction ,
+						StepActionImPulse=>	StepActionImPulse			 );
+
+		(*------------------------------------------------------- sfc Reset-------------------------------------------------- *)
+				IF	Reset
+					THEN
+						CbaSpindleLowSpeedOutput	:=	FALSE;
+						ZaxisCbaLimit				:=	FALSE;
+						StepNew						:= 	0;
+						Done						:=	FALSE;
+						ErrorOut						:=	FALSE;
+						ErrorID						:=	0;
+						StopChipBreaker				:=	FALSE;
+						WarningAaxisIsSlow			:=	FALSE;
+				END_IF;
+
+	(*##################################ERROR####################################*)
+				ErrorOut	:=	Chip_Breaker_Servo.ErrorOut OR
+							Chip_Breaker_Cylinder.ErrorOut;
+			
+				(*Cba Error*)
+			
+				IF	Chip_Breaker_Servo.ErrorOut OR
+					Chip_Breaker_Cylinder.ErrorOut
+					THEN
+						StepNew		:=	9500;			(*ErrorOut*)
+				END_IF;
+
+
+CASE	SfcChipBreakerAuto.Step	OF
+
+	(*-----------------------------------------------------------------Init Step---------------------------------------------------------------------*)
+
+	0	:(* action: predefine values *)
+				IF	StepActionImPulse
+					THEN
+					(* set axis state for check *)
+						AxisState	:=	STATE_DISABLED;
+					(* Reset x-axis *)
+						AxisCtrl[AxisNo.XAxis].Command.OperationMode.CmdPowerOn			:=	FALSE;
+						AxisCtrl[AxisNo.XAxis].Command.OperationMode.CmdMoveAbsolut		:=	FALSE;
+						AxisCtrl[AxisNo.XAxis].Command.OperationMode.CmdCamming			:=	FALSE;
+
+					(* Reset Z-axis *)
+						AxisCtrl[AxisNo.ZAxis].Command.OperationMode.CmdPowerOn			:=	FALSE;
+						AxisCtrl[AxisNo.ZAxis].Command.OperationMode.CmdMoveAbsolut		:=	FALSE;
+						AxisCtrl[AxisNo.ZAxis].Command.OperationMode.CmdCamming			:=	FALSE;
+
+					(*Reset A-Axis*)
+						AxisCtrl[AxisNo.AAxis].Command.OperationMode.CmdPowerOn			:=	FALSE;
+						AxisCtrl[AxisNo.AAxis].Command.OperationMode.CmdMoveAbsolut		:=	FALSE;
+						AxisCtrl[AxisNo.AAxis].Command.OperationMode.CmdCamming			:=	FALSE;
+
+						CBAutoNotPossibleWithTooLargeSbDiameter							:=	FALSE;
+
+						Done						:=	FALSE;
+						ErrorOut						:=	FALSE;
+						ErrorID						:=	0;
+						TouchPositionXAxis			:=	0;
+						TouchPositionZAxis			:=	0;
+						Paused						:=	FALSE;
+						PauseStep					:=	0;
+						PauseAvailable				:=	FALSE;
+						PauseRequest				:=	FALSE;
+						WorkingStepNo				:=	1;
+						CammingActive				:=	FALSE;
+						NumberTouch				:=	0;
+						Delta						:=	0;
+						ChipBreakerAutoServoDone	:=	FALSE;
+						ChipBreakerAutoSpindleDone	:=	FALSE;
+						ActualTeeth					:=      0;
+						ActualRevolutions				:=	0;
+						StopChipBreaker				:=	FALSE;
+						ZaxisCbaLimit				:=	FALSE;
+						WarningAaxisIsSlow			:=	FALSE;
+						CbaSpindleLowSpeedOutput	:=	FALSE;;
+				END_IF;
+				(* transition *)
+				IF	StepAction AND
+					(NOT StepActionImPulse) AND
+					(* stop switch not pressed *)
+					PauseSwitchActive
+					THEN
+						IF	MachineCtrl.Peripheral.ChipBreaker.Auto.PositionningMode.ManualPositionningIsActive
+							THEN
+								StepNew	:= 5;										(* -> wait for Start *)
+							ELSE
+								StepNew	:= 10;									(* -> wait for Start *)
+						END_IF;
+				END_IF;
+
+		(* -----------------------------------------------------Deactivate Safety State------------------------------------------------------ *)
+		5:		(* action:   *)
+				IF	StepActionImPulse
+					THEN
+						(* Disable safe state  *)
+						MachineCtrl.Peripheral.SafetyState.CmdDeactivate	:=	TRUE;
+						MachineCtrl.ProcessControl.Event.En				:=	TRUE;
+						MachineCtrl.ProcessControl.Event.No				:=	EvNoStartStop;
+				END_IF;
+
+				TONWaitSafetyStatePause( IN  	:=  	StepAction AND
+												( NOT MachineCtrl.Peripheral.SafetyState.CmdDeactivate ) AND
+												( NOT MachineCtrl.state.SafetyState.unit.IsActive ),
+										 PT 	:= 	TIME#20ms);
+
+				(* transition:  *)
+				IF	StepAction AND
+					(NOT StepActionImPulse) AND
+					(* state safety state *)
+						( NOT MachineCtrl.Peripheral.SafetyState.CmdDeactivate ) AND
+						( NOT MachineCtrl.state.SafetyState.unit.IsActive ) AND
+						TONWaitSafetyStatePause.Q
+					THEN
+						MachineCtrl.ProcessControl.Event.No		:=	EvNoOpenDoorInitSetUpMode;
+						MachineCtrl.ProcessControl.Event.En		:=	FALSE;
+						StepNew								:= 	10;		(*Turbine On*)
+				END_IF;
+
+		(*--------------------------------------------  wait for Start------------------------------------------------------- *)
+	10	:		(* transition:  *)
+				IF	StepAction AND
+					(NOT StepActionImPulse) AND
+					(* recut/resharp only in automatic mode *)
+						AutomaticMode AND
+					(* Start sfc from external *)
+						Start AND
+					(* machine door is closed *)
+						MachineStateSharpenerDoorIsClosed AND
+					(* safe state are disabled *)
+						(NOT MachineStateSafetyStateActive) AND
+					 (* stop switch not pressed *)
+						(PauseSwitchActive)
+					THEN
+						StepNew	:= 300;									(* ->ChipBreaker Type*)
+				END_IF;
+		(*------------------------Set Chip Breaker Type+Enable A-Axis------------------------------*)
+	300	:		(*Transition*)
+				IF	( CbaMotionType=StepperMotor )
+					THEN
+						StepNew		:=	350;								(*Enable A-Axis *)
+						ELSIF	( CbaMotionType=Pneumatic )
+					THEN
+						StepNew		:=	500;								(*Cba Cylinder*)
+				END_IF;
+		(*------------------------------------------Enable A-Axis-----------------------------------------------*)
+	350:			 (*Action*)
+				IF	StepActionImPulse
+					THEN
+					(* set A axis  state for check *)
+						AxisState	:=	STATE_WAIT_NEWOPERATION;
+					(*A-Axis- Enable*)
+						AxisCtrl[AxisNo.AAxis].Command.OperationMode.CmdPowerOn			:=	TRUE;
+						AxisCtrl[AxisNo.AAxis].Command.OperationMode.CmdMoveAbsolut		:=	FALSE;
+						AxisCtrl[AxisNo.AAxis].Command.OperationMode.CmdCamming			:=	FALSE;
+						AxisCtrl[AxisNo.AAxis].Command.ExternalControl.override				:=	100;
+				END_IF;
+				(*Transtion*)
+				IF	(NOT Axis[AxisNo.AAxis].Status.Disabled) AND
+					Axis[AxisNo.AAxis].Status.StandStill AND
+					( AxisCtrl[AxisNo.AAxis].feedback.state.ActualFbState = AxisState )
+					THEN
+						StepNew		:=	355;								(*Cba Servo  *)
+				END_IF;
+		(*------------------------------------------Servo---------------------------------------------------------*)
+	355:
+				(*Action*)
+				ACT_CbaStepperMotor();
+				SubFunctionStep			:=	Chip_Breaker_Servo.SfcChipBreakerAuto.Step;
+				ActualTeeth				:=	Chip_Breaker_Servo.ActualTeeth;
+				ActualRevolutions			:=	Chip_Breaker_Servo.ActualRevolutions;
+				ActualInfeed				:=	Chip_Breaker_Servo.ActualInfeed;
+				PartialInfeed				:=	Chip_Breaker_Servo.PartialInfeed;
+
+				(*Transition Done*)
+				IF	StepAction AND
+					(NOT StepActionImPulse) AND
+					(NOT Chip_Breaker_Servo.ErrorOut) AND
+					ChipBreakerAutoServoDone
+					THEN
+						StepNew				:=	1000;					(*Process Finished----> Wait For New Operation*)
+				END_IF;
+				(*Transition Error*)
+				IF	StepAction AND
+					(NOT StepActionImPulse) AND
+					Chip_Breaker_Servo.ErrorOut
+					THEN
+						ErrorOut	:=	TRUE;
+						ErrorID	:=	Chip_Breaker_Servo.ErrorID;
+						StepNew	:= 	9500;										(* -> error *)
+				END_IF;
+
+				(*Transition Stop*)
+				IF	StepAction AND
+					(NOT StepActionImPulse)AND
+					(NOT Chip_Breaker_Servo.ErrorOut) AND
+					Chip_Breaker_Servo.StopChipBreaker
+					THEN
+						StepNew			:=	10000;							(*Cba stopped*)
+						StopChipBreaker	:=	Chip_Breaker_Servo.StopChipBreaker;
+				END_IF;
+
+		(*-------------------------------------------------------Cylinder---------------------------------------------------------*)
+	500:			(*Action*)
+				ACT_CbaPneumatic();
+				SubFunctionStep			:=	Chip_Breaker_Cylinder.SfcChipBreakerAuto.Step;
+				ActualTeeth				:=	Chip_Breaker_Cylinder.ActualTeeth;
+				ActualRevolutions			:=	Chip_Breaker_Cylinder.ActualRevolutions;
+				ActualInfeed				:=	Chip_Breaker_Cylinder.ActualInfeed;
+				PartialInfeed				:=	Chip_Breaker_Cylinder.PartialInfeed;
+
+				(*Transition Done *)
+				IF	StepAction AND
+					(NOT Chip_Breaker_Cylinder.ErrorOut) AND
+					ChipBreakerAutoSpindleDone
+					THEN
+						StepNew					:=	1000;					(*Process Finished*)
+				END_IF;
+
+				(*Transition Error*)
+				IF	StepAction AND
+					 Chip_Breaker_Cylinder.ErrorOut
+					THEN
+						ErrorOut	:=	TRUE;
+						ErrorID	:=	Chip_Breaker_Cylinder.ErrorID;
+						StepNew	:= 	9500;									(* -> error *)
+				END_IF;
+				(*Transition Stop*)
+				IF	StepAction AND
+					(NOT StepActionImPulse)AND
+					(NOT Chip_Breaker_Cylinder.ErrorOut) AND
+					(NOT ChipBreakerAutoSpindleDone) AND
+					Chip_Breaker_Cylinder.StopChipBreaker
+					THEN
+						StepNew			:=	10000;							(*Cba stopped*)
+						StopChipBreaker	:=	Chip_Breaker_Cylinder.StopChipBreaker;
+				END_IF;
+		(*------------------------------------------Done ----------------------------------------------------*)
+	1000	:	(*Transition*)
+				IF	StepAction AND
+					( ChipBreakerAutoSpindleDone OR
+					ChipBreakerAutoServoDone )
+					THEN
+						Done		:=	TRUE;
+						StepNew		:=	10;
+				END_IF;
+
+		(*----------------------------------------######Error#######--------------------------------*)
+	9500:(*Action*)
+
+			;	(*Nothing to do*)
+
+		(*#######################STOP-PROCESS####################*)
+	10000:
+		(*Action*)
+		IF	StepActionImPulse
+			THEN
+					; (*Nothing To do*)
+		END_IF;
+
+END_CASE;
+		(*############################END##############################*)
+
+
+END_FUNCTION_BLOCK
+ACTION	ACT_CbaPneumatic:
+
+(*Cba  Cylinder*)
+
+Chip_Breaker_Cylinder(
+						Start										:=	 StepAction AND
+																	( NOT StepActionImPulse ) AND
+																	 (StepNew = 500) ,
+						Reset									:=	StepActionImPulse AND
+																	(StepNew = 500),
+						KeyNextStep								:= 	MachineCtrl.Peripheral.ExternalControl.ConfirmTouchpos,
+						PauseSwitchActive						:=	PauseSwitchActive ,
+						ManPosActive							:=	ManPosActive,
+						MachineStateSafetyStateActive				:=	MachineStateSafetyStateActive ,
+						MachineStateSharpenerDoorIsClosed		:=	MachineStateSharpenerDoorIsClosed ,
+						AutomaticMode							:=	AutomaticMode ,
+						ActualSawBlade							:=	ActualSawBlade ,
+						ActualGrindingWheel						:=	ActualGrindingWheel,
+						ActualJob								:=	ActualJob ,
+						WorkingAngle							:=	UI.MachineSpecification.Base.WorkingAngle,
+						ToothPitch								:=	MachineCtrl.ProcessTemp.ActualOrderStackBuffer.ActualOrder.SawBlade.MeanToothPitch,
+						GrindingDirCW							:=	GrindingDirCW ,
+						Zx										:=	,
+						MarginRearValue							:=	,
+						MarginFrontValue							:=	,
+						CbaMotionType							:=	CbaMotionType,
+						TeethNumber								:=	TeethNumber	 ,
+						Stepper									:=	Stepper,					(*Input Variable To Use The Servo Motor*)
+						CbaPneumatic							:=	CbaPneumatic,		(*Input Variable To Use The Spindle*)
+						Done									:=	ChipBreakerAutoSpindleDone ,
+						TouchPositionZAxis						:=	TouchPositionZAxisFront ,
+						ChipBreakerAutoVeloTemp					:=	ChipBreakerAutoVeloTemp ,
+						ChipBreakerManVeloOverrideFactor			:=	ChipBreakerManVeloOverrideFactor	 ,
+						DoubleTouch								:=	DoubleTouch ,
+						SimpleTouch								:=	SimpleTouch ,
+						XMoveManual							:=	XMoveManual,
+						YDistanceToTouchPos					:=	YDistanceToTouchPos,
+						ZaxisCbaLimit							=>	ZaxisCbaLimit,
+						WarningAaxisIsSlow						=>	WarningAaxisIsSlow,
+						CbaSpindleLowSpeedOutput				=>	CbaSpindleLowSpeedOutput,
+						CBAutoNotPossibleWithTooLargeSbDiameter	=>	CBAutoNotPossibleWithTooLargeSbDiameter,
+						CbaSpindleLowSpeedOutput				=>	CbaSpindleLowSpeedOutput,
+						ToothCount								=> 	,
+						ActualStep								=>	 ,
+						ErrorID									=>	 ,
+						ErrorOut									=>	 ,
+						Paused									=>	 ,
+						PauseRequest							=>	 ,
+						PauseAvailable							=>	 ,
+						CammingActive							=>	 ,
+						ActualRevolutions							=> 	 ,
+						ZStartposBuffered							=>					 );
+
+
+END_ACTION
+
+ACTION	ACT_CbaStepperMotor:
+
+(*Cba servo*)
+
+Chip_Breaker_Servo(
+							Start										:=	 StepAction AND
+																		( NOT StepActionImPulse ) AND
+																		 (StepNew = 355) ,
+							Reset									:=	StepActionImPulse AND
+																		(StepNew = 355),
+							KeyNextStep								:= 	MachineCtrl.Peripheral.ExternalControl.ConfirmTouchpos,
+							PauseSwitchActive						:=	PauseSwitchActive ,
+							ManPosActive							:=	ManPosActive,
+							MachineStateSafetyStateActive				:=	MachineStateSafetyStateActive	 ,
+							MachineStateSharpenerDoorIsClosed		:=	MachineStateSharpenerDoorIsClosed ,
+							AutomaticMode							:=	AutomaticMode ,
+							ActualSawBlade							:= 	ActualSawBlade,
+							ActualGrindingWheel						:=	ActualGrindingWheel,
+							ActualJob								:=	ActualJob ,
+							WorkingAngle							:=	UI.MachineSpecification.Base.WorkingAngle,
+							ToothPitch								:= 	MachineCtrl.ProcessTemp.ActualOrderStackBuffer.ActualOrder.SawBlade.MeanToothPitch,
+							GrindingDirCW							:=	GrindingDirCw ,
+							Zx										:=	,
+							MarginRearValue							:=	,
+							MarginFrontValue							:=	,
+							CbaMotionType							:=	CbaMotionType,
+							TeethNumber								:=	TeethNumber ,
+							Stepper									:=	Stepper ,					(*Input Variable To Use The Servo Motor*)
+							CbaPneumatic							:=	CbaPneumatic ,					(*Input Variable To Use The Pneumatik Cylindre*)
+							Done									:=	 ChipBreakerAutoServoDone ,
+							TouchPositionZAxis						:=	TouchPositionZAxisFront ,
+							ChipBreakerAutoVeloTemp					:=	ChipBreakerAutoVeloTemp ,
+							ChipBreakerManVeloOverrideFactor			:=	ChipBreakerManVeloOverrideFactor	 ,
+							DoubleTouch								:=	DoubleTouch ,
+							SimpleTouch								:=	SimpleTouch ,
+							XMoveManual							:=	XMoveManual,
+							YDistanceToTouchPos					:=	YDistanceToTouchPos,
+							CBAutoNotPossibleWithTooLargeSbDiameter	=>	CBAutoNotPossibleWithTooLargeSbDiameter,
+							ZaxisCbaLimit							=>	ZaxisCbaLimit,
+							WarningAaxisIsSlow						=>	WarningAaxisIsSlow,
+							CbaSpindleLowSpeedOutput				=>	CbaSpindleLowSpeedOutput,
+							ToothCount								=> 	,
+							ActualStep								=>	 ,
+							ErrorID									=>	 ,
+							ErrorOut									=>	,
+							Paused									=>	 ,
+							PauseRequest							=>	,
+							PauseAvailable							=>	 ,
+							CammingActive							=>	 ,
+							ActualRevolutions							=>	 ,
+							ZStartposBuffered							=>					 );
+
+
+
+
+END_ACTION
+
